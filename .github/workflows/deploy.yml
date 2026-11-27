@@ -1,0 +1,44 @@
+name: Publish app
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: true
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.pages.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Assemble site
+        run: |
+          set -euo pipefail
+          mkdir -p _site/vendor/wasm /tmp/dl
+          cp index.html styles.css app.js engine.js worker.js faces.js store.js sw.js manifest.webmanifest icon-180.png icon-512.png _site/
+          cd /tmp/dl
+          npm pack @mediapipe/tasks-vision@1.2.3 jpeg-js@0.4.4
+          mkdir mp jj
+          tar xzf mediapipe-tasks-vision-1.2.3.tgz -C mp
+          tar xzf jpeg-js-0.4.4.tgz -C jj
+          V="$GITHUB_WORKSPACE/_site/vendor"
+          cp mp/package/vision_bundle.mjs "$V/"
+          cp mp/package/wasm/* "$V/wasm/"
+          { cat jj/package/lib/encoder.js; echo; echo 'export default encode;'; } > "$V/jpeg-encoder.js"
+          cp jj/package/LICENSE "$V/jpeg-js-LICENSE.txt"
+          curl -fsSL -o "$V/face_landmarker.task" https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task
+          test "$(stat -c%s "$V/face_landmarker.task")" -gt 1000000
+          sed -i "s/__BUILD__/${GITHUB_SHA::12}/" "$GITHUB_WORKSPACE/_site/sw.js"
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+      - id: pages
+        uses: actions/deploy-pages@v5
