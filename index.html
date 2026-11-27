@@ -28,7 +28,7 @@
     <label class="btn primary" for="file">Open photo</label>
     <button id="resume" hidden>Resume last edit</button>
     <button id="forget" hidden>Delete saved edit</button>
-    <p class="note">Editing happens on this phone.</p>
+    <p class="note">Editing happens on this phone. Version 2</p>
   </div>
   <div id="badge" hidden></div>
 </main>
@@ -37,20 +37,29 @@
     <button data-tool="move" class="on">Sliders</button>
     <button data-tool="heal">Blemish</button>
     <button data-tool="mask">Mask</button>
+    <button data-tool="eyes">Eye tap</button>
   </nav>
   <div id="targets"></div>
   <div data-for="move">
+    <div id="groups"><button data-group="skin">Skin</button><button data-group="eyes">Eyes &amp; teeth</button><button data-group="makeup">Makeup</button></div>
     <div id="sliders"></div>
-    <div class="row"><button id="applyAll">Copy to all faces</button><button id="reset">Reset this area</button><button id="find">Find missed face</button></div>
+    <p id="needsFace" class="note" hidden>These need a detected face. For a dog or a missed eye, use Eye tap.</p>
+    <div class="row"><button id="applyAll">Copy to all faces</button><button id="reset">Reset this area</button><button id="find">Tap a missed face</button><button id="rescan">Rescan faces</button></div>
   </div>
   <div data-for="heal" hidden>
     <label class="slide"><span>Brush size</span><input id="healSize" type="range" min="6" max="60" value="16"><output></output></label>
     <p class="note">Tap the centre of a mark. Pinch to zoom in; the brush then covers a smaller area of the photo.</p>
   </div>
+  <div data-for="eyes" hidden>
+    <label class="slide"><span>Circle size</span><input id="eyeSize" type="range" min="6" max="60" value="18"><output></output></label>
+    <p class="note">Zoom in, set the circle to match the iris, then tap its centre. The sliders apply to all tapped eyes.</p>
+    <div id="tapSliders"></div>
+    <div class="row"><button id="eyeUndo">Remove last eye</button><button id="eyeClear">Remove all</button></div>
+  </div>
   <div data-for="mask" hidden>
     <div class="row"><button id="maskAdd" class="on">Add skin</button><button id="maskErase">Erase</button><button id="maskClear">Clear my strokes</button></div>
     <label class="slide"><span>Brush size</span><input id="maskSize" type="range" min="6" max="80" value="28"><output></output></label>
-    <p class="note">Red shows where this area's sliders apply. Two fingers move and zoom.</p>
+    <p class="note">Red shows where this area's skin sliders apply. Two fingers move and zoom.</p>
   </div>
 </section>
 <dialog id="done">

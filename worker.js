@@ -1,10 +1,13 @@
-import {prepare,render,heal,pickSource} from './engine.js';
+import {prepare,render,heal,pickSource,renderFeatures,renderTapEyes,isActive,SKIN_KEYS} from './engine.js';
 let original=null,healed=null,healKey=null,cache=new Map();
 const copy=i=>({width:i.width,height:i.height,data:new Uint8ClampedArray(i.data)});
 function applyHeals(img,heals){for(const s of heals)heal(img,s);return img;}
+// All skin passes first, then eyes, teeth and makeup on top.
 function compose(src,state,get){
   const out=copy(src);
-  for(const t of state.targets){const L=get(src,t,state);if(L)render(src,out,L,state.params[t.id]);}
+  for(const t of state.targets)if(isActive(state.params[t.id],SKIN_KEYS)){const L=get(src,t,state);if(L)render(src,out,L,state.params[t.id]);}
+  for(const t of state.targets)renderFeatures(out,t,state.params[t.id]);
+  if(state.eyes&&state.eyes.length)renderTapEyes(out,state.eyes,state.params.eyes);
   return out;
 }
 self.onmessage=async e=>{
@@ -28,8 +31,7 @@ self.onmessage=async e=>{
     else if(m.type==='export'){
       const {default:encode}=await import('./vendor/jpeg-encoder.js');
       const src=applyHeals(m.image,m.state.heals),st=m.state;
-      const active=st.targets.filter(t=>{const p=st.params[t.id];return p&&(p.smooth||p.lines||p.tone||p.redness||p.shine);});
-      const out=active.length?compose(src,{...st,targets:active},(s,t,state)=>prepare(s,t,state.strokes)):src;
+      const out=compose(src,st,(s,t,state)=>prepare(s,t,state.strokes));
       const jpg=encode(out,95).data;
       self.postMessage({id:m.id,jpg},[jpg.buffer]);
     }

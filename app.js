@@ -1,11 +1,16 @@
-import {ZERO,OVAL} from './engine.js';
-import {detect} from './faces.js';
+import {ZERO,OVAL,COLOURS,SKIN_KEYS,isActive} from './engine.js';
+import {detectAll,detectRegion,faceBox,sameFace} from './faces.js';
 import * as store from './store.js';
 
 const $=s=>document.querySelector(s),view=$('#view'),ctx=view.getContext('2d');
 const PREVIEW=2048,MAX_PIXELS=50e6;
-const SLIDERS=[['smooth','Smoothing'],['texture','Pore detail'],['lines','Soften lines'],['tone','Even tone'],['redness','Less redness'],['shine','Less shine']];
-const fresh=()=>({targets:[{id:'paint',pts:null}],params:{},strokes:[],heals:[]});
+const GROUPS={
+  skin:[['smooth','Smoothing'],['texture','Pore detail'],['lines','Soften lines'],['tone','Even tone'],['redness','Less redness'],['shine','Less shine']],
+  eyes:[['underEye','Under-eyes'],['eyeWhite','Eye whites'],['iris','Iris pop'],['eyeSharp','Eye sharpness'],['catchlight','Catchlight'],['teeth','Whiten teeth']],
+  makeup:[['lips','Lip colour'],['lipColor','Lip shade'],['blush','Blush'],['blushColor','Blush shade'],['shadow','Eyeshadow'],['shadowColor','Shadow shade'],['liner','Eyeliner'],['brows','Darken brows']]};
+const TAP_SLIDERS=[['eyeWhite','Brighten'],['iris','Iris pop'],['eyeSharp','Sharpness'],['catchlight','Catchlight']];
+const fresh=()=>({targets:[{id:'paint',pts:null}],params:{},strokes:[],heals:[],eyes:[]});
+let group='skin',scanning=false;
 let state=fresh(),history=[],future=[],selected='paint',tool='move',maskMode='add',findMode=false;
 let photo=null,full=null,before=null,after=null,overlay=null,showBefore=false,exported=null;
 const base=document.createElement('canvas'),done=document.createElement('canvas'),orig=document.createElement('canvas'),tint=document.createElement('canvas');
@@ -44,7 +49,7 @@ function paintTint(){
 const snap=()=>JSON.stringify(state);
 let committed=snap(),saveTimer;
 function commit(){const now=snap();if(now===committed)return;history.push(committed);if(history.length>80)history.shift();future=[];committed=now;buttons();save();}
-function travel(from,to){if(!from.length)return;to.push(committed);committed=from.pop();state=JSON.parse(committed);if(!state.targets.some(t=>t.id===selected))selected=state.targets[0].id;buttons();panel();refresh();save();}
+function travel(from,to){if(!from.length)return;to.push(committed);committed=from.pop();state=JSON.parse(committed);state.eyes=state.eyes||[];if(!state.targets.some(t=>t.id===selected))selected=state.targets[0].id;buttons();panel();refresh();save();}
 function save(){clearTimeout(saveTimer);saveTimer=setTimeout(()=>store.put('edit',{state,selected}).catch(()=>badge('Could not save this edit for later.',3000)),400);}
 function buttons(){$('#undo').disabled=!history.length;$('#redo').disabled=!future.length;$('#compare').disabled=$('#export').disabled=!photo;}
 
@@ -53,21 +58,41 @@ const label=t=>t.pts?'Face '+(state.targets.filter(x=>x.pts).indexOf(t)+1):'Pain
 function panel(){
   $('#targets').replaceChildren(...[...state.targets].sort((a,b)=>!a.pts-!b.pts).map(t=>{
     const b=document.createElement('button');b.textContent=label(t);b.className=t.id===selected?'on':'';
-    b.onclick=()=>{selected=t.id;panel();refresh();draw();};return b;}));
+    b.onclick=()=>{const again=selected===t.id;selected=t.id;if(t.pts){again&&cam.zoomed?fit():zoomTo(t);}panel();refresh();draw();};return b;}));
   const p={...ZERO,...state.params[selected]};
-  for(const [k] of SLIDERS){const i=$('#s-'+k);i.value=p[k];i.nextElementSibling.textContent=p[k];}
+  for(const rows of Object.values(GROUPS))for(const [k] of rows){const i=$('#s-'+k);i.value=p[k];if(!COLOURS[k])i.nextElementSibling.textContent=p[k];}
+  const tp={...ZERO,...state.params.eyes};
+  for(const [k] of TAP_SLIDERS){const i=$('#e-'+k);i.value=tp[k];i.nextElementSibling.textContent=tp[k];}
+  const needsFace=group!=='skin'&&selected==='paint';
+  for(const g of Object.keys(GROUPS))$('#g-'+g).hidden=g!==group||needsFace;
+  $('#needsFace').hidden=!needsFace;
+  for(const b of $('#groups').children)b.classList.toggle('on',b.dataset.group===group);
   for(const el of document.querySelectorAll('[data-for]'))el.hidden=el.dataset.for!==tool;
   for(const b of $('#tools').children)b.classList.toggle('on',b.dataset.tool===tool);
 }
-for(const [k,name] of SLIDERS){
+function control(parent,id,key,name,owner){
   const l=document.createElement('label');l.className='slide';
   const s=document.createElement('span');s.textContent=name;
-  const i=document.createElement('input');i.type='range';i.min=0;i.max=100;i.id='s-'+k;
-  const o=document.createElement('output');l.append(s,i,o);$('#sliders').append(l);
-  i.oninput=()=>{state.params[selected]={...ZERO,...state.params[selected],[k]:+i.value};o.textContent=i.value;refresh();
-    if(selected==='paint'&&!state.strokes.some(s=>s.target==='paint'&&s.mode==='add'))badge('Use Mask → Add skin to paint an area first.',3000);};
-  i.onchange=commit;
+  const set=v=>{const t=owner();state.params[t]={...ZERO,...state.params[t],[key]:v};refresh();};
+  if(COLOURS[key]){
+    const i=document.createElement('select');i.id=id;COLOURS[key].forEach((c,n)=>i.add(new Option(c[0],n)));
+    i.onchange=()=>{set(+i.value);commit();};l.append(s,i);
+  }else{
+    const i=document.createElement('input');i.type='range';i.min=0;i.max=100;i.id=id;
+    const o=document.createElement('output');l.append(s,i,o);
+    i.oninput=()=>{o.textContent=i.value;set(+i.value);
+      if(owner()==='paint'&&SKIN_KEYS.includes(key)&&!state.strokes.some(s=>s.target==='paint'&&s.mode==='add'))badge('Use Mask → Add skin to paint an area first.',3000);
+      if(owner()==='eyes'&&!state.eyes.length)badge('Tap the photo to place an eye first.',3000);};
+    i.onchange=commit;
+  }
+  parent.append(l);
 }
+for(const [g,rows] of Object.entries(GROUPS)){const d=document.createElement('div');d.id='g-'+g;$('#sliders').append(d);for(const [k,name] of rows)control(d,'s-'+k,k,name,()=>selected);}
+for(const [k,name] of TAP_SLIDERS)control($('#tapSliders'),'e-'+k,k,name,()=>'eyes');
+$('#groups').onclick=e=>{const g=e.target.dataset.group;if(!g)return;group=g;panel();};
+$('#eyeUndo').onclick=()=>{state.eyes.pop();commit();refresh();draw();};
+$('#eyeClear').onclick=()=>{state.eyes=[];commit();refresh();draw();};
+$('#rescan').onclick=()=>scan();
 $('#tools').onclick=e=>{const t=e.target.dataset.tool;if(!t)return;tool=t;findMode=false;badge('');panel();refresh();draw();};
 $('#applyAll').onclick=()=>{const p=state.params[selected]||ZERO;for(const t of state.targets)if(t.pts)state.params[t.id]={...ZERO,...p};commit();refresh();badge('Copied to all faces.',2000);};
 $('#reset').onclick=()=>{delete state.params[selected];commit();panel();refresh();};
@@ -75,7 +100,7 @@ $('#find').onclick=()=>{findMode=true;badge('Tap the middle of the missed face.'
 const maskButtons=m=>{maskMode=m;$('#maskAdd').classList.toggle('on',m==='add');$('#maskErase').classList.toggle('on',m==='erase');};
 $('#maskAdd').onclick=()=>maskButtons('add');$('#maskErase').onclick=()=>maskButtons('erase');
 $('#maskClear').onclick=()=>{state.strokes=state.strokes.filter(s=>s.target!==selected);commit();refresh();};
-for(const id of ['#healSize','#maskSize']){const i=$(id),show=()=>i.nextElementSibling.textContent=i.value;i.oninput=show;show();}
+for(const id of ['#healSize','#maskSize','#eyeSize']){const i=$(id),show=()=>i.nextElementSibling.textContent=i.value;i.oninput=show;show();}
 $('#undo').onclick=()=>travel(history,future);$('#redo').onclick=()=>travel(future,history);
 const cmp=$('#compare'),setBefore=v=>{showBefore=v;draw();};
 cmp.onpointerdown=e=>{cmp.setPointerCapture(e.pointerId);setBefore(true);};
@@ -83,6 +108,10 @@ cmp.onpointerup=cmp.onpointercancel=cmp.onlostpointercapture=()=>setBefore(false
 cmp.oncontextmenu=e=>e.preventDefault();
 
 /* drawing and gestures */
+function zoomTo(t){
+  const b=faceBox(t.pts,base.width,base.height),w=view.clientWidth,h=view.clientHeight,s=Math.max(cam.min,Math.min(cam.min*16,Math.min(w/(b.w*1.35),h/(b.h*1.35))));
+  cam={...cam,s,x:w/2-b.cx*s,y:h/2-b.cy*s,zoomed:true};
+}
 function fit(){if(!photo)return;const w=view.clientWidth,h=view.clientHeight,s=Math.min(w/base.width,h/base.height);cam={s,min:s,x:(w-base.width*s)/2,y:(h-base.height*s)/2};}
 let size='';
 new ResizeObserver(()=>{const d=devicePixelRatio||1,w=view.clientWidth,h=view.clientHeight,key=w+'x'+h;if(key===size)return;size=key;view.width=w*d;view.height=h*d;fit();draw();}).observe($('#stage'));
@@ -94,7 +123,9 @@ function draw(){
   if(tool==='mask'&&overlay)ctx.drawImage(tint,overlay.x0,overlay.y0,overlay.rw,overlay.rh);
   if(live){ctx.strokeStyle=maskMode==='add'?'#ff4060aa':'#ffffffaa';ctx.lineCap=ctx.lineJoin='round';ctx.lineWidth=2*live.r*Math.max(base.width,base.height);ctx.beginPath();
     live.pts.forEach((p,i)=>ctx[i?'lineTo':'moveTo'](p[0]*base.width,p[1]*base.height));if(live.pts.length===1)ctx.lineTo(live.pts[0][0]*base.width+0.1,live.pts[0][1]*base.height);ctx.stroke();}
+  if(tool==='eyes')for(const e of state.eyes){ctx.beginPath();ctx.arc(e.x*base.width,e.y*base.height,e.r*Math.max(base.width,base.height),0,2*Math.PI);ctx.strokeStyle='#fffc';ctx.lineWidth=1.5/cam.s;ctx.stroke();}
   const faces=state.targets.filter(t=>t.pts);
+  if(tool==='move'&&faces.length>1)faces.forEach((t,n)=>{const b=faceBox(t.pts,base.width,base.height);ctx.fillStyle='#fff';ctx.font=`600 ${13/cam.s}px system-ui`;ctx.textAlign='center';ctx.fillText(n+1,b.cx,b.y0-4/cam.s);});
   if(tool==='move'&&faces.length>1)for(const t of faces){ctx.beginPath();OVAL.forEach((i,k)=>ctx[k?'lineTo':'moveTo'](t.pts[i][0]*base.width,t.pts[i][1]*base.height));ctx.closePath();
     ctx.strokeStyle=t.id===selected?'#fffc':'#fff4';ctx.lineWidth=(t.id===selected?2:1)/cam.s;ctx.stroke();}
 }
@@ -132,7 +163,8 @@ async function lift(e){
     try{const {off}=await call({type:'pick',spot,heals:state.heals});if(gen!==generation)return;
       if(!off)return badge('No clean patch nearby. Try a smaller brush.',3000);
       state.heals.push({...spot,off});commit();refresh();}catch(err){badge(err.message,5000);}
-  }else if(findMode){findMode=false;await findNear(x,y);}
+  }else if(tool==='eyes'){state.eyes.push({x,y,r:brush('#eyeSize')});commit();refresh();draw();}
+  else if(findMode){findMode=false;await findNear(x,y);}
   else if(tool==='move'){
     const hit=state.targets.find(t=>{if(!t.pts)return false;const xs=OVAL.map(i=>t.pts[i][0]),ys=OVAL.map(i=>t.pts[i][1]);return x>=Math.min(...xs)&&x<=Math.max(...xs)&&y>=Math.min(...ys)&&y<=Math.max(...ys);});
     if(hit){selected=hit.id;panel();draw();}
@@ -141,29 +173,47 @@ async function lift(e){
 view.onpointerup=view.onpointercancel=lift;
 
 /* faces */
-const centre=f=>[f[1][0],f[1][1]];
-const width=f=>Math.abs(f[454][0]-f[234][0]);
 function addFaces(found){
-  let added=null;
+  let added=null,count=0;const W=base.width,H=base.height;
   for(const f of found){
-    if(state.targets.some(t=>t.pts&&Math.hypot(centre(t.pts)[0]-centre(f)[0],centre(t.pts)[1]-centre(f)[1])<width(f)*0.4))continue;
+    const box=faceBox(f,W,H);
+    if(state.targets.some(t=>t.pts&&sameFace(faceBox(t.pts,W,H),box)))continue;
     const t={id:'f'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),pts:f.map(p=>[+p[0].toFixed(5),+p[1].toFixed(5)])};
-    state.targets.push(t);added=added||t;
+    state.targets.push(t);added=added||t;count++;
   }
-  return added;
+  if(count){
+    const extra=state.targets.slice(-count),put=j=>{const s=JSON.parse(j);for(const t of extra)if(!s.targets.some(x=>x.id===t.id))s.targets.push(t);return JSON.stringify(s);};
+    history=history.map(put);future=future.map(put);committed=put(committed);save();
+  }
+  return {added,count};
 }
-async function findNear(x,y){
-  badge('Looking for a face…');const gen=generation;
+async function scan(){
+  if(scanning||!photo)return;scanning=true;const gen=generation;
   try{
-    for(const frac of [0.18,0.35,0.6]){
-      const side=Math.max(base.width,base.height)*frac,r={x:Math.max(0,x*base.width-side/2),y:Math.max(0,y*base.height-side/2)};
-      r.w=Math.min(side,base.width-r.x);r.h=Math.min(side,base.height-r.y);
-      const found=await detect(orig,r);if(gen!==generation)return;
-      const near=found.filter(f=>Math.hypot((centre(f)[0]-x)*base.width,(centre(f)[1]-y)*base.height)<side/2);
-      const t=addFaces(near);
-      if(t){selected=t.id;commit();panel();refresh();return badge('Face added.',2000);}
+    const found=await detectAll(full,full.naturalWidth,full.naturalHeight,(i,n)=>{if(gen!==generation)return false;badge(`Looking for faces… ${Math.round(100*i/n)}%`);});
+    if(gen===generation){
+      const {added,count}=addFaces(found),total=state.targets.filter(t=>t.pts).length;
+      if(added&&selected==='paint')selected=added.id;
+      badge(total?`${total} ${total===1?'face':'faces'} found${count&&count<total?` (${count} new)`:''}. Tap a face number below to zoom.`:'No human face found. Use Blemish, Mask or Eye tap.',4500);
+      panel();refresh();
     }
-    badge('No new face found there. You can use the Mask tool instead.',5000);
+  }catch(e){console.error(e);if(gen===generation)badge('Face finding failed to load or run. Mask, Blemish and Eye tap still work.',8000);}
+  scanning=false;
+  if(gen!==generation&&pending===generation)scan();
+}
+let pending=0;
+async function findNear(x,y){
+  badge('Looking for a face…');const gen=generation,W=full.naturalWidth,H=full.naturalHeight;
+  try{
+    for(const frac of [0.08,0.13,0.2,0.32,0.5]){
+      const side=Math.max(W,H)*frac,r={x:Math.max(0,x*W-side/2),y:Math.max(0,y*H-side/2)};
+      r.w=Math.min(side,W-r.x);r.h=Math.min(side,H-r.y);
+      const found=await detectRegion(full,W,H,r);if(gen!==generation)return;
+      const near=found.filter(f=>{const b=faceBox(f,W,H);return Math.hypot(b.cx-x*W,b.cy-y*H)<Math.max(b.w,b.h);});
+      const {added}=addFaces(near);
+      if(added){selected=added.id;save();panel();refresh();return badge('Face added.',2000);}
+    }
+    badge('No new face found there. Try Mask for skin, or Eye tap for the eyes.',5000);
   }catch(e){console.error(e);badge('Face finding failed to load or run. Mask and Blemish still work.',6000);}
 }
 
@@ -186,16 +236,11 @@ async function load(blob,saved){
   state=saved?saved.state:fresh();selected=saved?saved.selected:'paint';history=[];future=[];committed=snap();overlay=null;tool='move';
   $('#empty').hidden=true;$('#panel').hidden=false;buttons();panel();size='';
   requestAnimationFrame(()=>{fit();draw();});
-  if(saved){badge('');refresh();return;}
+  state.eyes=state.eyes||[];
+  if(saved){badge('');panel();refresh();return;}
   store.wipe().then(()=>store.put('photo',blob)).then(()=>store.put('edit',{state,selected})).catch(()=>badge('This edit cannot be saved for later.',3000));
-  badge('Finding faces… the first time may take longer.');
-  try{
-    const found=await detect(orig);if(gen!==generation)return;
-    const first=addFaces(found);
-    if(first){selected=first.id;committed=snap();save();badge(found.length+(found.length===1?' face found.':' faces found.'),2500);}
-    else badge('No human face found. Use Blemish, or paint an area with Mask.',6000);
-  }catch(e){console.error(e);badge('Face finding failed to load or run. Mask and Blemish still work.',8000);}
-  panel();refresh();
+  badge('Finding faces… the first time may take longer.');panel();refresh();
+  pending=gen;scan();
 }
 $('#file').onchange=e=>{const f=e.target.files[0];e.target.value='';if(f)load(f).catch(err=>badge(err.message,6000));};
 store.get('photo').then(p=>{if(p){$('#resume').hidden=$('#forget').hidden=false;}}).catch(()=>{});
@@ -233,5 +278,9 @@ $('#export').onclick=async()=>{
 $('#share').onclick=()=>navigator.share({files:[exported.file]}).catch(()=>{});
 $('#close').onclick=()=>$('#done').close();
 
-if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
+if('serviceWorker' in navigator){
+  const had=!!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange',()=>{if(had)badge('An update is ready. Close the app completely and reopen it.');});
+  navigator.serviceWorker.register('sw.js').catch(()=>{});
+}
 panel();
